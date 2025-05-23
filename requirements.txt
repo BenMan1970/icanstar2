@@ -1,6 +1,6 @@
 streamlit
 pandas
-numpy==1.23.5
+numpy==1.26.4
 yfinance
-pandas-ta==0.3.14b0
+pandas-ta
 setuptools
