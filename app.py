@@ -1,153 +1,337 @@
-# --- Section 1: Fonction de Calcul de l'Indicateur Canadian Confluence ---
-def calculate_canadian_confluence(df, hmaLength, adxThreshold, rsiLength, adxLength, ichimokuLength, len1_smooth_ha, len2_smooth_ha):
-    min_rows_needed = max(hmaLength, adxLength, rsiLength, ichimokuLength, 26, 52, len1_smooth_ha, len2_smooth_ha) + 50
-    current_price_fallback = 0
-    if not df.empty and 'Close' in df.columns and not df['Close'].empty:
-        current_price_fallback = df['Close'].iloc[-1]
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import talib
+from datetime import datetime, timedelta
+import time
+
+# Configuration de la page
+st.set_page_config(
+    page_title="Scanner Confluence Forex Premium",
+    page_icon="⭐",
+    layout="wide"
+)
+
+st.title("🔍 Scanner Confluence Forex Premium")
+st.markdown("*Filtrage automatique 5-6 étoiles sur les paires forex et XAU/USD*")
+
+# Liste des paires forex principales + XAU/USD
+FOREX_PAIRS = [
+    'EURUSD=X', 'GBPUSD=X', 'USDJPY=X', 'USDCHF=X', 'AUDUSD=X', 'USDCAD=X',
+    'NZDUSD=X', 'EURJPY=X', 'GBPJPY=X', 'EURGBP=X', 'AUDJPY=X', 'EURAUD=X',
+    'EURCHF=X', 'AUDNZD=X', 'NZDJPY=X', 'GBPAUD=X', 'GBPCAD=X', 'EURNZD=X',
+    'AUDCAD=X', 'GBPCHF=X', 'CADCHF=X', 'EURCAD=X', 'AUDCHF=X', 'NZDCAD=X',
+    'NZDCHF=X', 'GC=F'  # XAU/USD (Gold)
+]
+
+# Paramètres par défaut (identiques au script TradingView)
+DEFAULT_PARAMS = {
+    'hma_length': 20,
+    'adx_threshold': 20,
+    'rsi_length': 10,
+    'adx_length': 14,
+    'ichimoku_length': 9,
+    'smoothed_ha_len1': 10,
+    'smoothed_ha_len2': 10
+}
+
+def get_forex_data(symbol, period='1d', interval='1h'):
+    """Récupère les données forex avec gestion d'erreurs"""
+    try:
+        ticker = yf.Ticker(symbol)
+        data = ticker.history(period=period, interval=interval)
+        if data.empty:
+            return None
+        return data
+    except Exception as e:
+        st.error(f"Erreur pour {symbol}: {str(e)}")
+        return None
+
+def calculate_hma(data, length):
+    """Calcule Hull Moving Average"""
+    try:
+        close = data['Close'].values
+        wma_half = talib.WMA(close, int(length/2))
+        wma_full = talib.WMA(close, length)
+        diff = 2 * wma_half - wma_full
+        hma = talib.WMA(diff, int(np.sqrt(length)))
+        return hma
+    except:
+        return np.full(len(data), np.nan)
+
+def calculate_heiken_ashi(data):
+    """Calcule les chandelles Heiken Ashi"""
+    ha_close = (data['Open'] + data['High'] + data['Low'] + data['Close']) / 4
+    ha_open = np.zeros(len(data))
+    ha_open[0] = (data['Open'].iloc[0] + data['Close'].iloc[0]) / 2
     
-    if len(df) < min_rows_needed:
-        return "Erreur", f"Pas assez de données ({len(df)}/{min_rows_needed})", current_price_fallback
-
-    df_calc = df.copy()
-    # Initialisation des signaux individuels
-    hma_slope_signal = 0      # -1, 0, or 1
-    ha_signal = 0             # -1, 0, or 1
-    smoothed_ha_signal = 0    # -1, 0, or 1
-    rsi_signal = 0            # -1, 0, or 1
-    adx_has_momentum_signal = 0 # 0 or 1
-    ichimoku_signal = 0       # -1, 0, or 1
-    current_price = current_price_fallback
-
-    # --- HMA ---
-    try:
-        hma_series = df_calc.ta.hma(length=hmaLength, append=False)
-        if hma_series is not None and not hma_series.isna().all() and len(hma_series) >= 2:
-            if hma_series.iloc[-1] > hma_series.iloc[-2]: hma_slope_signal = 1
-            elif hma_series.iloc[-1] < hma_series.iloc[-2]: hma_slope_signal = -1
-        else: return "Erreur HMA", "Calcul HMA impossible", current_price
-    except Exception as e: return "Erreur HMA", str(e), current_price
-
-    # --- Heiken Ashi Standard ---
-    try:
-        ha_df_calc = df_calc.copy() # Utiliser une copie pour éviter les modifications de df_calc par .ta.ha(append=True)
-        ha_df = ha_df_calc.ta.ha(append=False) # Important: append=False
-        if ha_df is not None and 'HA_close' in ha_df.columns and 'HA_open' in ha_df.columns and \
-           not ha_df['HA_close'].isna().all() and not ha_df['HA_open'].isna().all() and len(ha_df) > 0:
-            if ha_df['HA_close'].iloc[-1] > ha_df['HA_open'].iloc[-1]: ha_signal = 1
-            elif ha_df['HA_close'].iloc[-1] < ha_df['HA_open'].iloc[-1]: ha_signal = -1
-        else: return "Erreur HA", "Calcul HA impossible", current_price
-    except Exception as e: return "Erreur HA", str(e), current_price
-
-    # --- Smoothed Heiken Ashi ---
-    try:
-        ohlc_ema = pd.DataFrame(index=df_calc.index)
-        ohlc_ema['Open'] = df_calc['Open'].ewm(span=len1_smooth_ha, adjust=False).mean()
-        ohlc_ema['High'] = df_calc['High'].ewm(span=len1_smooth_ha, adjust=False).mean()
-        ohlc_ema['Low'] = df_calc['Low'].ewm(span=len1_smooth_ha, adjust=False).mean()
-        ohlc_ema['Close'] = df_calc['Close'].ewm(span=len1_smooth_ha, adjust=False).mean()
-
-        ha_on_ema = pd.DataFrame(index=ohlc_ema.index)
-        ha_on_ema['haclose_s1'] = (ohlc_ema['Open'] + ohlc_ema['High'] + ohlc_ema['Low'] + ohlc_ema['Close']) / 4
-        ha_on_ema['haopen_s1'] = np.nan
-        first_valid_idx = ohlc_ema.first_valid_index()
-        if first_valid_idx is not None and not ohlc_ema.loc[first_valid_idx, ['Open', 'Close']].isna().any():
-            ha_on_ema.loc[first_valid_idx, 'haopen_s1'] = (ohlc_ema.loc[first_valid_idx, 'Open'] + ohlc_ema.loc[first_valid_idx, 'Close']) / 2
-        start_loop_idx = ha_on_ema['haopen_s1'].first_valid_index()
-        if start_loop_idx is not None:
-            start_loop_iloc = ha_on_ema.index.get_loc(start_loop_idx)
-            for i_loop in range(start_loop_iloc + 1, len(ha_on_ema)): # Renommé 'i' pour éviter conflit
-                prev_actual_idx, curr_actual_idx = ha_on_ema.index[i_loop-1], ha_on_ema.index[i_loop]
-                if not pd.isna(ha_on_ema.loc[prev_actual_idx, 'haopen_s1']) and not pd.isna(ha_on_ema.loc[prev_actual_idx, 'haclose_s1']):
-                    ha_on_ema.loc[curr_actual_idx, 'haopen_s1'] = (ha_on_ema.loc[prev_actual_idx, 'haopen_s1'] + ha_on_ema.loc[prev_actual_idx, 'haclose_s1']) / 2
-                elif not ohlc_ema.loc[curr_actual_idx, ['Open', 'Close']].isna().any():
-                    ha_on_ema.loc[curr_actual_idx, 'haopen_s1'] = (ohlc_ema.loc[curr_actual_idx, 'Open'] + ohlc_ema.loc[curr_actual_idx, 'Close']) / 2
-        ha_on_ema.dropna(subset=['haopen_s1', 'haclose_s1'], inplace=True)
-        if ha_on_ema.empty: return "Erreur HA Lissé", "Données HA_on_EMA vides", current_price
-        
-        smooth_ha_open = ha_on_ema['haopen_s1'].ewm(span=len2_smooth_ha, adjust=False).mean()
-        smooth_ha_close = ha_on_ema['haclose_s1'].ewm(span=len2_smooth_ha, adjust=False).mean()
-        
-        if not smooth_ha_open.empty and not smooth_ha_close.empty and \
-           not smooth_ha_open.isna().all() and not smooth_ha_close.isna().all() and \
-           len(smooth_ha_open) > 0 and len(smooth_ha_close) > 0: # Ajout de vérification de longueur
-            # Pine: smoothedHaSignal = o2 > c2 ? -1 : 1  (o2=smooth_ha_open, c2=smooth_ha_close)
-            # Si open > close (o2 > c2) -> baissier (-1)
-            # Si open < close (o2 < c2) -> haussier (1)
-            if smooth_ha_open.iloc[-1] > smooth_ha_close.iloc[-1]: smoothed_ha_signal = -1 # Baissier
-            elif smooth_ha_open.iloc[-1] < smooth_ha_close.iloc[-1]: smoothed_ha_signal = 1 # Haussier
-        else: return "Erreur HA Lissé", "Calcul EMA HA Lissé impossible", current_price
-    except Exception as e: return "Erreur HA Lissé", str(e), current_price
-
-    # --- RSI ---
-    try:
-        hlc4 = (df_calc['Open'] + df_calc['High'] + df_calc['Low'] + df_calc['Close']) / 4
-        rsi_series = pd_ta.rsi(close=hlc4, length=rsiLength, append=False)
-        if rsi_series is not None and not rsi_series.isna().all() and len(rsi_series) > 0:
-            if rsi_series.iloc[-1] > 50: rsi_signal = 1
-            elif rsi_series.iloc[-1] < 50: rsi_signal = -1
-        else: return "Erreur RSI", "Calcul RSI impossible", current_price
-    except Exception as e: return "Erreur RSI", str(e), current_price
-
-    # --- ADX ---
-    try:
-        adx_df_calc = df_calc.copy() # Utiliser une copie
-        adx_df = adx_df_calc.ta.adx(length=adxLength, append=False)
-        adx_col_name = f'ADX_{adxLength}'
-        if adx_df is not None and adx_col_name in adx_df.columns and \
-           not adx_df[adx_col_name].isna().all() and len(adx_df[adx_col_name]) > 0: # Vérifier la colonne spécifique
-            adx_val = adx_df[adx_col_name].iloc[-1]
-            if adx_val >= adxThreshold: adx_has_momentum_signal = 1
-        else: return "Erreur ADX", f"Calcul ADX impossible (col {adx_col_name})", current_price
-    except Exception as e: return "Erreur ADX", str(e), current_price
-
-    # --- Ichimoku ---
-    try:
-        tenkan_period, kijun_period, senkou_b_period = ichimokuLength, 26, 52
-        tenkan_sen = (df_calc['High'].rolling(window=tenkan_period).max() + df_calc['Low'].rolling(window=tenkan_period).min()) / 2
-        kijun_sen = (df_calc['High'].rolling(window=kijun_period).max() + df_calc['Low'].rolling(window=kijun_period).min()) / 2
-        senkou_a_current = (tenkan_sen + kijun_sen) / 2
-        senkou_b_current = (df_calc['High'].rolling(window=senkou_b_period).max() + df_calc['Low'].rolling(window=senkou_b_period).min()) / 2
-        
-        if tenkan_sen.empty or kijun_sen.empty or senkou_a_current.empty or senkou_b_current.empty or \
-           tenkan_sen.isna().all() or kijun_sen.isna().all() or senkou_a_current.isna().all() or senkou_b_current.isna().all() or \
-           len(df_calc['Close']) == 0 or len(cloud_top_current) == 0 or len(cloud_bottom_current) == 0: # Ajout de vérifications
-             return "Erreur Ichimoku", "Calcul lignes/cloud Ichimoku impossible", current_price
-
-        cloud_top_current = pd.concat([senkou_a_current, senkou_b_current], axis=1).max(axis=1)
-        cloud_bottom_current = pd.concat([senkou_a_current, senkou_b_current], axis=1).min(axis=1)
-
-        # S'assurer que les index correspondent pour iloc[-1]
-        if not df_calc.index.equals(cloud_top_current.index) or not df_calc.index.equals(cloud_bottom_current.index):
-            # Réindexer si nécessaire, ou gérer l'erreur. Pour l'instant, on suppose qu'ils devraient correspondre.
-            # Si ce n'est pas le cas, il y a un problème de données en amont.
-             pass # Pour l'instant, on laisse, mais c'est un point d'attention
-
-        current_close_val = df_calc['Close'].iloc[-1]
-        current_cloud_top_val = cloud_top_current.iloc[-1]
-        current_cloud_bottom_val = cloud_bottom_current.iloc[-1]
-        
-        if pd.isna(current_close_val) or pd.isna(current_cloud_top_val) or pd.isna(current_cloud_bottom_val):
-             return "Erreur Ichimoku", "Données cloud Ichimoku manquantes (NaN)", current_price
-        if current_close_val > current_cloud_top_val: ichimoku_signal = 1
-        elif current_close_val < current_cloud_bottom_val: ichimoku_signal = -1
-    except Exception as e: return "Erreur Ichimoku", str(e), current_price
+    for i in range(1, len(data)):
+        ha_open[i] = (ha_open[i-1] + ha_close.iloc[i-1]) / 2
     
-    # --- Calcul des Confluences (Aligné sur Pine Script) ---
-    bullConfluences, bearConfluences = 0,0
+    return ha_close, ha_open
 
-    if hma_slope_signal == 1: bullConfluences += 1
-    if ha_signal == 1: bullConfluences += 1
-    if smoothed_ha_signal == 1: bullConfluences += 1 # Correspond à o2 < c2 dans Pine
-    if rsi_signal == 1: bullConfluences += 1
-    if adx_has_momentum_signal == 1: bullConfluences += 1 # Ajoute si momentum
-    if ichimoku_signal == 1: bullConfluences +=1
+def calculate_smoothed_heiken_ashi(data, len1, len2):
+    """Calcule les chandelles Heiken Ashi lissées"""
+    try:
+        # Première étape de lissage
+        o = data['Open'].ewm(span=len1).mean()
+        c = data['Close'].ewm(span=len1).mean()
+        h = data['High'].ewm(span=len1).mean()
+        l = data['Low'].ewm(span=len1).mean()
+        
+        ha_close = (o + h + l + c) / 4
+        ha_open = np.zeros(len(data))
+        ha_open[0] = (o.iloc[0] + c.iloc[0]) / 2
+        
+        for i in range(1, len(data)):
+            ha_open[i] = (ha_open[i-1] + ha_close.iloc[i-1]) / 2
+        
+        ha_high = np.maximum(h, np.maximum(ha_open, ha_close))
+        ha_low = np.minimum(l, np.minimum(ha_open, ha_close))
+        
+        # Deuxième étape de lissage
+        o2 = pd.Series(ha_open).ewm(span=len2).mean()
+        c2 = ha_close.ewm(span=len2).mean()
+        
+        return o2.values, c2.values
+    except:
+        return np.full(len(data), np.nan), np.full(len(data), np.nan)
 
-    if hma_slope_signal == -1: bearConfluences += 1
-    if ha_signal == -1: bearConfluences += 1
-    if smoothed_ha_signal == -1: bearConfluences += 1 # Correspond à o2 > c2 dans Pine
-    if rsi_signal == -1: bearConfluences += 1
-    if adx_has_momentum_signal == 1: bearConfluences += 1 # Ajoute si momentum
-    if ichimoku_signal == -1: bearConfluences +=1
+def calculate_ichimoku(data, length=9):
+    """Calcule les nuages Ichimoku"""
+    try:
+        # Tenkan-sen
+        tenkan = (data['High'].rolling(length).max() + data['Low'].rolling(length).min()) / 2
+        
+        # Kijun-sen
+        kijun = (data['High'].rolling(26).max() + data['Low'].rolling(26).min()) / 2
+        
+        # Senkou Span A
+        senkou_a = (tenkan + kijun) / 2
+        
+        # Senkou Span B
+        senkou_b = (data['High'].rolling(52).max() + data['Low'].rolling(52).min()) / 2
+        
+        cloud_top = np.maximum(senkou_a, senkou_b)
+        cloud_bottom = np.minimum(senkou_a, senkou_b)
+        
+        return cloud_top.values, cloud_bottom.values
+    except:
+        return np.full(len(data), np.nan), np.full(len(data), np.nan)
+
+def calculate_confluence_signals(data, params):
+    """Calcule tous les signaux de confluence"""
+    if data is None or len(data) < 60:
+        return None
     
-    return bullConfluences, bearConfluences, current_price
-  
+    try:
+        # 1. HMA Signal
+        hma = calculate_hma(data, params['hma_length'])
+        hma_slope = 1 if hma[-1] > hma[-2] else -1
+        
+        # 2. Heiken Ashi Signal
+        ha_close, ha_open = calculate_heiken_ashi(data)
+        ha_signal = 1 if ha_close.iloc[-1] > ha_open[-1] else -1
+        
+        # 3. Smoothed Heiken Ashi Signal
+        sha_open, sha_close = calculate_smoothed_heiken_ashi(data, params['smoothed_ha_len1'], params['smoothed_ha_len2'])
+        sha_signal = 1 if sha_close[-1] > sha_open[-1] else -1
+        
+        # 4. RSI Signal
+        rsi_source = (data['Open'] + data['High'] + data['Low'] + data['Close']) / 4
+        rsi = talib.RSI(rsi_source.values, timeperiod=params['rsi_length'])
+        rsi_signal = 1 if rsi[-1] > 50 else -1
+        
+        # 5. ADX Signal
+        adx = talib.ADX(data['High'].values, data['Low'].values, data['Close'].values, timeperiod=params['adx_length'])
+        adx_has_momentum = adx[-1] >= params['adx_threshold']
+        
+        # 6. Ichimoku Signal
+        cloud_top, cloud_bottom = calculate_ichimoku(data, params['ichimoku_length'])
+        close_price = data['Close'].iloc[-1]
+        if close_price > cloud_top[-1]:
+            ichimoku_signal = 1
+        elif close_price < cloud_bottom[-1]:
+            ichimoku_signal = -1
+        else:
+            ichimoku_signal = 0
+        
+        # Calcul des confluences
+        bull_confluences = 0
+        bear_confluences = 0
+        
+        bull_confluences += 1 if hma_slope == 1 else 0
+        bull_confluences += 1 if ha_signal == 1 else 0
+        bull_confluences += 1 if sha_signal == 1 else 0
+        bull_confluences += 1 if rsi_signal == 1 else 0
+        bull_confluences += 1 if adx_has_momentum else 0
+        bull_confluences += 1 if ichimoku_signal == 1 else 0
+        
+        bear_confluences += 1 if hma_slope == -1 else 0
+        bear_confluences += 1 if ha_signal == -1 else 0
+        bear_confluences += 1 if sha_signal == -1 else 0
+        bear_confluences += 1 if rsi_signal == -1 else 0
+        bear_confluences += 1 if adx_has_momentum else 0
+        bear_confluences += 1 if ichimoku_signal == -1 else 0
+        
+        confluence = max(bull_confluences, bear_confluences)
+        direction = "HAUSSIER" if bull_confluences > bear_confluences else "BAISSIER"
+        
+        return {
+            'confluence': confluence,
+            'direction': direction,
+            'bull_confluences': bull_confluences,
+            'bear_confluences': bear_confluences,
+            'rsi': rsi[-1],
+            'adx': adx[-1],
+            'adx_momentum': adx_has_momentum,
+            'signals': {
+                'HMA': "▲" if hma_slope == 1 else "▼",
+                'HA': "▲" if ha_signal == 1 else "▼",
+                'SHA': "▲" if sha_signal == 1 else "▼",
+                'RSI': "▲" if rsi_signal == 1 else "▼",
+                'ADX': "✔" if adx_has_momentum else "✖",
+                'Ichimoku': "▲" if ichimoku_signal == 1 else "▼" if ichimoku_signal == -1 else "─"
+            }
+        }
+    except Exception as e:
+        st.error(f"Erreur calcul confluence: {str(e)}")
+        return None
+
+def get_rating_stars(confluence):
+    """Retourne le nombre d'étoiles selon la confluence"""
+    if confluence == 6:
+        return "⭐⭐⭐⭐⭐⭐"
+    elif confluence == 5:
+        return "⭐⭐⭐⭐⭐"
+    elif confluence == 4:
+        return "⭐⭐⭐⭐"
+    elif confluence == 3:
+        return "⭐⭐⭐"
+    elif confluence == 2:
+        return "⭐⭐"
+    elif confluence == 1:
+        return "⭐"
+    else:
+        return "WAIT"
+
+def main():
+    # Sidebar pour les paramètres
+    st.sidebar.header("⚙️ Paramètres")
+    
+    # Sélection de la timeframe
+    timeframe = st.sidebar.selectbox(
+        "Timeframe",
+        ["1h", "4h", "1d"],
+        index=0
+    )
+    
+    # Filtrage minimum
+    min_stars = st.sidebar.selectbox(
+        "Filtrage minimum",
+        [5, 6],
+        index=0
+    )
+    
+    # Bouton de scan
+    if st.sidebar.button("🔍 Scanner les paires", type="primary"):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        results = []
+        
+        for i, symbol in enumerate(FOREX_PAIRS):
+            progress = (i + 1) / len(FOREX_PAIRS)
+            progress_bar.progress(progress)
+            status_text.text(f"Analyse de {symbol}... ({i+1}/{len(FOREX_PAIRS)})")
+            
+            # Récupération des données
+            data = get_forex_data(symbol, period='5d', interval=timeframe)
+            
+            if data is not None:
+                # Calcul des signaux
+                signals = calculate_confluence_signals(data, DEFAULT_PARAMS)
+                
+                if signals and signals['confluence'] >= min_stars:
+                    pair_name = symbol.replace('=X', '').replace('=F', ' (Gold)')
+                    results.append({
+                        'Paire': pair_name,
+                        'Direction': signals['direction'],
+                        'Confluence': signals['confluence'],
+                        'Étoiles': get_rating_stars(signals['confluence']),
+                        'RSI': f"{signals['rsi']:.1f}",
+                        'ADX': f"{signals['adx']:.1f}",
+                        'HMA': signals['signals']['HMA'],
+                        'Heiken Ashi': signals['signals']['HA'],
+                        'HA Lissé': signals['signals']['SHA'],
+                        'RSI Signal': signals['signals']['RSI'],
+                        'ADX Momentum': signals['signals']['ADX'],
+                        'Ichimoku': signals['signals']['Ichimoku']
+                    })
+            
+            time.sleep(0.1)  # Éviter les limites de taux
+        
+        progress_bar.empty()
+        status_text.empty()
+        
+        # Affichage des résultats
+        if results:
+            st.success(f"🎯 {len(results)} paire(s) trouvée(s) avec {min_stars}+ étoiles!")
+            
+            # Tri par confluence descendante
+            results_df = pd.DataFrame(results)
+            results_df = results_df.sort_values('Confluence', ascending=False)
+            
+            # Affichage avec style
+            st.dataframe(
+                results_df,
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Section détaillée
+            st.subheader("📊 Détails des signaux")
+            for _, row in results_df.iterrows():
+                with st.expander(f"🔹 {row['Paire']} - {row['Étoiles']} ({row['Direction']})"):
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.metric("RSI", row['RSI'])
+                        st.metric("ADX", row['ADX'])
+                    
+                    with col2:
+                        st.write("**Signaux techniques:**")
+                        st.write(f"• HMA: {row['HMA']}")
+                        st.write(f"• Heiken Ashi: {row['Heiken Ashi']}")
+                        st.write(f"• HA Lissé: {row['HA Lissé']}")
+                    
+                    with col3:
+                        st.write("**Confirmations:**")
+                        st.write(f"• RSI: {row['RSI Signal']}")
+                        st.write(f"• ADX: {row['ADX Momentum']}")
+                        st.write(f"• Ichimoku: {row['Ichimoku']}")
+        else:
+            st.warning(f"❌ Aucune paire trouvée avec {min_stars}+ étoiles pour le moment.")
+            st.info("💡 Essayez avec un filtrage plus bas ou une timeframe différente.")
+    
+    # Informations sur les indicateurs
+    with st.expander("ℹ️ Informations sur les indicateurs"):
+        st.markdown("""
+        **Indicateurs utilisés (identiques au script TradingView):**
+        
+        • **HMA (Hull Moving Average)** - Longueur: 20
+        • **Heiken Ashi** - Chandelles lissées
+        • **Heiken Ashi Smoothed** - Double lissage (10/10)
+        • **RSI** - Longueur: 10 (sur OHLC/4)
+        • **ADX** - Longueur: 14, Seuil: 20
+        • **Ichimoku** - Longueur: 9
+        
+        **Système de notation:**
+        - ⭐⭐⭐⭐⭐⭐ (6/6) = Signal très fort
+        - ⭐⭐⭐⭐⭐ (5/6) = Signal fort
+        - Filtrage automatique sur 5-6 étoiles uniquement
+        """)
+
+if __name__ == "__main__":
+    main()
+   
